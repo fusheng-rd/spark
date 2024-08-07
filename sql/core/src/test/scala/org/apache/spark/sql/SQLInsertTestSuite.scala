@@ -23,8 +23,11 @@ import org.apache.spark.sql.catalyst.parser.ParseException
 import org.apache.spark.sql.connector.catalog.InMemoryPartitionTableCatalog
 import org.apache.spark.sql.execution.CommandResultExec
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
+import org.apache.spark.sql.execution.datasources.InsertIntoHadoopFsRelationCommand
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.SQLConf.PartitionOverwriteMode
 import org.apache.spark.sql.test.{SharedSparkSession, SQLTestUtils}
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -548,6 +551,81 @@ trait SQLInsertTestSuite extends QueryTest with SQLTestUtils with AdaptiveSparkP
         case r: ReusedExchangeExec => r
       }
       assert(reusedExchanges.size == 1)
+    }
+  }
+
+
+  test("SPARK-48881: test some dynamic partitions can be compensated to " +
+    "specific partition values") {
+    withTable("A", "B") {
+      spark.sessionState.conf.setConfString("spark.sql.sources.partitionOverwriteMode",
+        PartitionOverwriteMode.DYNAMIC.toString)
+      sql("create table A(id int) using parquet partitioned by " +
+        "(event_day string, event_type string)")
+      spark.range(10).selectExpr("id").withColumns(Seq("event_day", "event_type"),
+          Seq(col("id").cast("string"), col("id").cast("string"))).write
+        .partitionBy("event_day", "event_type").saveAsTable("B")
+
+      sql("insert overwrite A partition(event_day='20240701', event_type='1') values(11)")
+      sql("insert overwrite A partition(event_day='20240702', event_type='2') values(12)")
+
+      val df = sql("insert overwrite A partition(event_day, event_type) " +
+        "select id, event_day, event_type from B where event_day in ('20240712') and id = 8")
+      val commandResults = df.queryExecution.analyzed.collect {
+        case i: InsertIntoHadoopFsRelationCommand => i
+      }
+      val insertIntoHadoopFsRelationCommand = commandResults.head
+      val matchingPartitions = spark.sessionState.catalog.listPartitions(
+        insertIntoHadoopFsRelationCommand.catalogTable.get.identifier,
+        Some(insertIntoHadoopFsRelationCommand.staticPartitions
+          ++ insertIntoHadoopFsRelationCommand.pullTopPredicateStaticPartitions))
+      val staticPartitions = insertIntoHadoopFsRelationCommand.staticPartitions
+      val pullTopPredicateStaticPartitions = insertIntoHadoopFsRelationCommand
+        .pullTopPredicateStaticPartitions
+      val dynamicPartitionOverwrite = insertIntoHadoopFsRelationCommand.dynamicPartitionOverwrite
+      assert(staticPartitions.size == 0)
+      assert(pullTopPredicateStaticPartitions == Map("event_day" -> "20240712"))
+      assert(dynamicPartitionOverwrite == true)
+      assert(matchingPartitions.size == 0)
+
+      val df2 = sql("insert overwrite A partition(event_day='20240712', event_type) " +
+        "select id, event_type from B where event_day in ('20240712') and id = 8")
+      val commandResults2 = df2.queryExecution.analyzed.collect {
+        case i: InsertIntoHadoopFsRelationCommand => i
+      }
+
+      val insertIntoHadoopFsRelationCommand2 = commandResults2.head
+      val matchingPartitions2 = spark.sessionState.catalog.listPartitions(
+        insertIntoHadoopFsRelationCommand2.catalogTable.get.identifier,
+        Some(insertIntoHadoopFsRelationCommand2.staticPartitions
+          ++ insertIntoHadoopFsRelationCommand2.pullTopPredicateStaticPartitions))
+      val staticPartitions2 = insertIntoHadoopFsRelationCommand2.staticPartitions
+      val pullTopPredicateStaticPartitions2 = insertIntoHadoopFsRelationCommand2
+        .pullTopPredicateStaticPartitions
+      val dynamicPartitionOverwrite2 = insertIntoHadoopFsRelationCommand2.dynamicPartitionOverwrite
+      assert(staticPartitions2 == Map("event_day" -> "20240712"))
+      assert(pullTopPredicateStaticPartitions2.size == 0)
+      assert(dynamicPartitionOverwrite2 == true)
+      assert(matchingPartitions2.size == 0)
+
+      val df3 = sql("insert overwrite A partition(event_day='20240712', event_type='1') " +
+        "select id from B where event_day in ('20240712') and id = 8")
+      val commandResults3 = df3.queryExecution.analyzed.collect {
+        case i: InsertIntoHadoopFsRelationCommand => i
+      }
+      val insertIntoHadoopFsRelationCommand3 = commandResults3.head
+      val matchingPartitions3 = spark.sessionState.catalog.listPartitions(
+        insertIntoHadoopFsRelationCommand3.catalogTable.get.identifier,
+        Some(insertIntoHadoopFsRelationCommand3.staticPartitions
+          ++ insertIntoHadoopFsRelationCommand3.pullTopPredicateStaticPartitions))
+      val staticPartitions3 = insertIntoHadoopFsRelationCommand3.staticPartitions
+      val pullTopPredicateStaticPartitions3 = insertIntoHadoopFsRelationCommand3
+        .pullTopPredicateStaticPartitions
+      val dynamicPartitionOverwrite3 = insertIntoHadoopFsRelationCommand3.dynamicPartitionOverwrite
+      assert(staticPartitions3 == Map("event_day" -> "20240712", "event_type" -> "1"))
+      assert(pullTopPredicateStaticPartitions3.size == 0)
+      assert(dynamicPartitionOverwrite3 == false)
+      assert(matchingPartitions3.head.spec == Map("event_day" -> "20240712", "event_type" -> "1"))
     }
   }
 }
