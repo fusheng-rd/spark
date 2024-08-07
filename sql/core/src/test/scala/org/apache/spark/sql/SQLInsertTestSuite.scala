@@ -553,6 +553,25 @@ trait SQLInsertTestSuite extends QueryTest with SQLTestUtils with AdaptiveSparkP
       assert(reusedExchanges.size == 1)
     }
   }
+}
+
+class FileSourceSQLInsertTestSuite extends SQLInsertTestSuite with SharedSparkSession {
+
+  override def format: String = "parquet"
+
+  override def checkV1AndV2Error(
+      exception: SparkThrowable,
+      v1ErrorClass: String,
+      v2ErrorClass: String,
+      v1Parameters: Map[String, String],
+      v2Parameters: Map[String, String]): Unit = {
+    checkError(exception = exception, sqlState = None, errorClass = v1ErrorClass,
+      parameters = v1Parameters)
+  }
+
+  override protected def sparkConf: SparkConf = {
+    super.sparkConf.set(SQLConf.USE_V1_SOURCE_LIST, format)
+  }
 
   test("SPARK-48881: test some dynamic partitions can be compensated to " +
     "specific partition values") {
@@ -677,25 +696,6 @@ trait SQLInsertTestSuite extends QueryTest with SQLTestUtils with AdaptiveSparkP
         Map("event_day" -> "20240712", "event_type" -> "1")
       ))
     }
-  }
-}
-
-class FileSourceSQLInsertTestSuite extends SQLInsertTestSuite with SharedSparkSession {
-
-  override def format: String = "parquet"
-
-  override def checkV1AndV2Error(
-      exception: SparkThrowable,
-      v1ErrorClass: String,
-      v2ErrorClass: String,
-      v1Parameters: Map[String, String],
-      v2Parameters: Map[String, String]): Unit = {
-    checkError(exception = exception, sqlState = None, errorClass = v1ErrorClass,
-      parameters = v1Parameters)
-  }
-
-  override protected def sparkConf: SparkConf = {
-    super.sparkConf.set(SQLConf.USE_V1_SOURCE_LIST, format)
   }
 
 }
